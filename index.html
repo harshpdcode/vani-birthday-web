@@ -1810,9 +1810,6 @@
     // GitHub raw CDN — fallback if media isn't served locally (e.g. Netlify drop)
     const GITHUB_CDN = 'https://raw.githubusercontent.com/harshpdcode/vani-birthday-web/main';
 
-    // GitHub CDN fallback – used when a file is not served locally (e.g. Netlify drop without images/).
-    const GITHUB_CDN = 'https://raw.githubusercontent.com/harshpdcode/vani-birthday-web/main';
-
     // Build the real URL: try local first, fallback to GitHub CDN on 404.
     function cdnUrl(path) {
       return path; // We start with local; onerror handlers swap to CDN
@@ -2472,98 +2469,125 @@
     }
 
     function preloadAssets() {
-      // Build the full asset list: all media + songs + hero
-      const mediaFiles = ALL_MEDIA.map(m => m.src);
-      const songs = MUSIC_TRACKS.map(t => t.src);
-      const heroVideo = 'images/hero.mp4';
-      const favIcon   = 'images/fav.jpeg';
+      // === STEP 1: Determine if we are running on a real server or file:// ===
+      const isFileProtocol = location.protocol === 'file:';
+      const GITHUB_CDN_BASE = GITHUB_CDN; // already defined above
 
-      // Deduplicate everything
-      const allAssets = [...new Set([heroVideo, favIcon, ...songs, ...mediaFiles])];
+      // === STEP 2: Collect assets ===
+      // We only XHR-preload images & songs (small files).
+      // Videos get their metadata loaded via <video> (no full download).
+      const photoSrcs  = ALL_MEDIA.filter(m => m.type === 'photo').map(m => m.src);
+      const songSrcs   = MUSIC_TRACKS.map(t => t.src);
+      const heroImg    = 'images/fav.jpeg';
 
+      // These are the "small" assets we fully preload for smooth experience
+      const quickAssets = [...new Set([heroImg, ...songSrcs, ...photoSrcs.slice(0, 8)])];
+
+      // === STEP 3: UI elements ===
       const fillEl = document.getElementById('ld-fill');
       const textEl = document.getElementById('ld-text');
 
-      let loadedBytes = {};
-      let totalBytes  = {};
-      let finished    = false;
-      let completedCount = 0;
+      let pct = 0;
+      let finished = false;
+      let quickDone = 0;
+      const quickTotal = quickAssets.length;
 
-      allAssets.forEach(src => { loadedBytes[src] = 0; totalBytes[src] = 1; });
-
-      function updateProgress() {
+      function setProgress(val) {
         if (finished) return;
-        let total = 0, loaded = 0;
-        for (const src of allAssets) {
-          total  += totalBytes[src]  || 1;
-          loaded += loadedBytes[src] || 0;
-        }
-        const pct = Math.min(99, Math.floor((loaded / total) * 100));
+        pct = Math.min(val, 99);
         if (fillEl) fillEl.style.width = pct + '%';
-        if (textEl) textEl.textContent  = `Loading Memories... ${pct}%`;
+        if (textEl) textEl.textContent = `Loading Memories... ${Math.round(pct)}%`;
       }
 
-      function onComplete() {
-        completedCount++;
-        if (completedCount >= allAssets.length && !finished) {
-          finished = true;
-          if (fillEl) fillEl.style.width = '100%';
-          if (textEl) textEl.textContent  = 'Ready! ❤️';
-          setTimeout(finishLoading, 500);
+      function finish() {
+        if (finished) return;
+        finished = true;
+        if (fillEl) fillEl.style.width = '100%';
+        if (textEl) textEl.textContent = 'Ready! ❤️';
+        setTimeout(finishLoading, 400);
+      }
+
+      // Auto-advance progress smoothly regardless of network
+      let autoTimer = null;
+      function startAutoProgress(from, to, durationMs) {
+        const steps = 60;
+        const stepMs = durationMs / steps;
+        const stepVal = (to - from) / steps;
+        let current = from;
+        clearInterval(autoTimer);
+        autoTimer = setInterval(() => {
+          current += stepVal;
+          setProgress(current);
+          if (current >= to) clearInterval(autoTimer);
+        }, stepMs);
+      }
+
+      // Start fake progress immediately (0 -> 40% in 1.5s)
+      startAutoProgress(0, 40, 1500);
+
+      // === STEP 4: Load quick assets ===
+      function onQuickDone() {
+        quickDone++;
+        const qPct = 40 + (quickDone / quickTotal) * 55; // 40% -> 95%
+        setProgress(qPct);
+        if (quickDone >= quickTotal) {
+          clearInterval(autoTimer);
+          setProgress(97);
+          setTimeout(finish, 300);
         }
       }
 
-      // Safety timeout: 90 seconds max — never block forever
-      setTimeout(() => {
-        if (!finished) {
-          finished = true;
-          if (fillEl) fillEl.style.width = '100%';
-          if (textEl) textEl.textContent  = 'Ready! ❤️';
-          finishLoading();
-        }
-      }, 90000);
-
-      // Fetch a single asset with CDN fallback on 404/error
-      function fetchAsset(src, isCdnRetry) {
-        const req = new XMLHttpRequest();
-        req.open('GET', src, true);
-        req.responseType = 'blob';
-        req.onprogress = (e) => {
-          if (e.lengthComputable) {
-            totalBytes[src]  = e.total;
-            loadedBytes[src] = e.loaded;
-            updateProgress();
-          }
-        };
-        req.onload = () => {
-          if (req.status === 200 || req.status === 304) {
-            loadedBytes[src] = totalBytes[src] = req.response ? req.response.size : 1;
-            updateProgress();
-            onComplete();
-          } else if (!isCdnRetry) {
-            // Try GitHub CDN
-            const cdnSrc = 'https://raw.githubusercontent.com/harshpdcode/vani-birthday-web/main/' + src;
-            fetchAsset(cdnSrc, true);
+      function loadImage(src) {
+        const img = new Image();
+        img.onload  = onQuickDone;
+        img.onerror = () => {
+          // Try CDN fallback
+          if (!img._cdnTried && !src.startsWith('http')) {
+            img._cdnTried = true;
+            img.src = GITHUB_CDN_BASE + '/' + src;
           } else {
-            onComplete(); // skip after CDN also fails
+            onQuickDone(); // give up, move on
           }
         };
-        req.onerror = () => {
-          if (!isCdnRetry) {
-            const cdnSrc = 'https://raw.githubusercontent.com/harshpdcode/vani-birthday-web/main/' + src;
-            fetchAsset(cdnSrc, true);
-          } else {
-            onComplete();
-          }
-        };
-        req.send();
+        img.src = src;
       }
 
-      allAssets.forEach(src => fetchAsset(src, false));
+      function loadAudio(src) {
+        // Audio can stall on file:// or slow networks — give it 2s max then move on
+        let audioDone = false;
+        const done = () => { if (!audioDone) { audioDone = true; onQuickDone(); } };
+        const au = new Audio();
+        au.preload = 'metadata'; // just metadata, not full download
+        au.onloadedmetadata = done;
+        au.oncanplay = done;
+        au.onerror = () => {
+          if (!au._cdnTried && !src.startsWith('http')) {
+            au._cdnTried = true;
+            au.src = GITHUB_CDN_BASE + '/' + src;
+          } else {
+            done(); // give up, move on
+          }
+        };
+        au.src = src;
+        // Safety: don't let one audio file block everything
+        setTimeout(done, 2000);
+      }
+
+      // Kick off quick asset loads
+      quickAssets.forEach(src => {
+        if (src.endsWith('.mp3') || src.endsWith('.m4a') || src.endsWith('.wav')) {
+          loadAudio(src);
+        } else {
+          loadImage(src);
+        }
+      });
+
+      // === STEP 5: Safety net — never block longer than 8 seconds ===
+      setTimeout(finish, 8000);
     }
 
 
-    // ================================================
+        // ================================================
     // BOOT
     // ================================================
     document.addEventListener('DOMContentLoaded', () => {
